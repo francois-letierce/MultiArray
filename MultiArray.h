@@ -21,13 +21,13 @@
 /**
  * TODO:
  * - Add allocator support as another template argument
+ * ---> Done, but I would like to able to default "Allocator" template parameter to std::allocator...
  * - Add alignment support
- * - Replace most exceptions with assert to be able to desactive them and be more GPU compliant
+ * - Replace most exceptions with assert to be able to deactivate them and be more GPU compliant
  * - Split class into more files
  * - Replace pointer with smart pointer
  * - Maybe split static and dynamic size code 
  */
-
 
 // ******************************* MACROs **************************************
 /**
@@ -59,10 +59,11 @@
  * @note Offset goes like this: ID_N + (ID_N-1 x DIM_N) + ... + (ID_1 x DIM_2 x ... x DIM_N)
  * 
  * @tparam T Data type
+ * @tparam Allocator User specified dynamic memory allocator
  * @tparam DIM_1 Desired size for 1st dimension
  * @tparam DIM_N Desired sizes for all other dimensions
  */
-template <typename T, size_t DIM_1, size_t... DIM_N>
+template <typename T, typename Allocator, size_t DIM_1, size_t... DIM_N>
 class MultiArray
 {
  public:
@@ -78,10 +79,10 @@ class MultiArray
    * 1 element of given type (e.g. (4 * 1)*sizeof(double)). Then, dynamic resizing will be required by
    * calling initSize(...) method.
    */
-  MultiArray()
+  MultiArray(Allocator alloc = Allocator())
     : m_size{(DIM_1?DIM_1:1), (DIM_N?DIM_N:1)...},
       m_nb_elmt(std::accumulate(m_size.begin(), m_size.end(), 1, std::multiplies<size_type>())),
-      m_self_destruct(true), m_ptr(new T[m_nb_elmt]) {}
+      m_self_destruct(true), m_alloc(alloc), m_ptr(m_alloc.allocate(m_nb_elmt)) {}
 
   /**
    * @brief Initializer list constructor
@@ -92,16 +93,19 @@ class MultiArray
    * 
    * @param init Brace-enclosed-list value. Must be as large as product of every template parameters
    */
-  MultiArray(std::initializer_list<T> init)
+  MultiArray(std::initializer_list<T> init, Allocator alloc = Allocator())
     : m_size{DIM_1,DIM_N...},
       m_nb_elmt(std::accumulate(m_size.begin(), m_size.end(), 1, std::multiplies<size_type>())),
-      m_self_destruct(true), m_ptr(nullptr) {
+      m_self_destruct(true), m_alloc(alloc), m_ptr(nullptr) {
     static_assert(DIM_1 && (DIM_N && ...), "Can't contruct a dynamic size MultiArray with initial values");
     if (m_nb_elmt != init.size())
       throw std::logic_error(
         "MultiArray ctor initializer list must have as much elements as indicated in class template parameters");
-    m_ptr = new T[m_nb_elmt];
+    m_ptr = m_alloc.allocate(m_nb_elmt);
     std::uninitialized_copy(init.begin(), init.end(), m_ptr);
+    // for (size_type i(0); i < m_nb_elmt; ++i)
+      // m_alloc.construct(&m_ptr[i], init.begin()[i]);
+      // std::construct_at(&m_ptr[i], init[i]);  // To change when above will be removed in C++20
   }
 
   /**
@@ -110,13 +114,38 @@ class MultiArray
    * 
    * @param a MultiArray to copy
    */
-  MultiArray(const MultiArray& a)
-    : m_size(a.m_size), m_nb_elmt(a.m_nb_elmt), m_self_destruct(true), m_ptr(new T[m_nb_elmt]) {
+  MultiArray(const MultiArray& a, Allocator alloc)
+    : m_size(a.m_size), m_nb_elmt(a.m_nb_elmt), m_self_destruct(true),
+      m_alloc(alloc), m_ptr(m_alloc.allocate(nullptr)) {
     if ((m_size.size() != a.m_size.size()) || (m_size != a.m_size))
       throw std::logic_error("Can't construct MultiArray from another MultiArray with different dimensions");
+    m_ptr = m_alloc.allocate(m_nb_elmt);
     std::uninitialized_copy(a.begin(), a.end(), m_ptr);
+    // for (size_type i(0); i < m_nb_elmt; ++i)
+      // m_alloc.construct(&m_ptr[i], a.m_ptr[i]);
+      // std::construct_at(&m_ptr[i], a.m_ptr[i]);  // To change when above will be removed in C++20
   }
 
+  /**
+   * @brief (Deep) Copy contructor overload
+   * (copy every value os a into already allocated memory of this)
+   * 
+   * @param a MultiArray to copy
+   */
+  MultiArray(const MultiArray& a)
+    : m_size(a.m_size), m_nb_elmt(a.m_nb_elmt), m_self_destruct(true),
+      m_alloc(a.m_alloc), m_ptr(m_alloc.allocate(nullptr)) {
+    if ((m_size.size() != a.m_size.size()) || (m_size != a.m_size))
+      throw std::logic_error("Can't construct MultiArray from another MultiArray with different dimensions");
+    m_ptr = m_alloc.allocate(m_nb_elmt);
+    std::uninitialized_copy(a.begin(), a.end(), m_ptr);
+    // for (size_type i(0); i < m_nb_elmt; ++i)
+      // m_alloc.construct(&m_ptr[i], a.m_ptr[i]);
+      // std::construct_at(&m_ptr[i], a.m_ptr[i]);  // To change when above will be removed in C++20
+  }
+
+// FIXME: Remove this Ctor, initSize has the same features and should be enough
+//        and futhermore, would be a terrible hassle to put an allocator as ctor parameter
 /**
    * @brief Constructor for dynamic allocation, 
    * which is indicated by a 0 value template parameter.
@@ -137,7 +166,7 @@ class MultiArray
     typename std::enable_if_t<
       std::is_integral_v<std::decay_t<SIZE_1>> && (std::is_integral_v<std::decay_t<SIZE_N>> && ...), void>* = nullptr>
   MultiArray(SIZE_1 size_1, SIZE_N... size_n)
-    : m_size{}, m_nb_elmt(0), m_self_destruct(true), m_ptr(nullptr) {
+    : m_size{}, m_nb_elmt(0), m_self_destruct(true), m_alloc(Allocator()), m_ptr(nullptr) {
     static_assert(sizeof...(size_n) == sizeof...(DIM_N),
                   "Constructor must have as much parameters as MultiArray template parameters");
     if ((DIM_1?DIM_1!=size_1:0) || ((DIM_N?DIM_N!=size_n:0) || ...))
@@ -149,7 +178,7 @@ class MultiArray
     if (!(size_1 && (size_n && ...)))
       throw std::logic_error("Don't pass 0 as dynamic size constructor parameter");
     m_nb_elmt = (size_1 * ... * size_n);
-    m_ptr = new T[m_nb_elmt];
+    m_ptr = m_alloc.allocate(m_nb_elmt);
     m_size = {static_cast<size_type>(size_1), static_cast<size_type>(size_n)...};
   }
 
@@ -157,7 +186,14 @@ class MultiArray
    * @brief Dtor
    * Destructor. Free memory only if boolean attribute m_self_destruct is true.
    */
-  ~MultiArray() {if (m_self_destruct) delete[] m_ptr;}
+  ~MultiArray() {
+    if (m_self_destruct) {
+      // for (size_type i(0); i < m_nb_elmt; ++i)
+        // m_alloc.destroy(&m_ptr[i]);
+        // std::destroy_at(&m_ptr[i]);  // To change when above will be removed in C++20
+      m_alloc.deallocate(m_ptr, m_nb_elmt);
+    }
+  }
 
   /**
    * @brief Deep copy operator (copy every value os a into already allocated memory of this)
@@ -171,6 +207,8 @@ class MultiArray
     m_size = a.m_size;
     m_nb_elmt = a.m_nb_elmt;
     std::uninitialized_copy(a.begin(), a.end(), m_ptr);
+    // for (size_type i(0); i < m_nb_elmt; ++i)
+      // m_ptr[i] = a.m_ptr[i];
     return *this;
   }
 
@@ -186,7 +224,8 @@ class MultiArray
         "Initializer list in MultiArray copy operator has " + std::to_string(list.size()) +
         " elements but should have " + std::to_string(m_nb_elmt));
     }
-    std::uninitialized_copy(list.begin(), list.end(), m_ptr);
+    for (size_type i(0); i < m_nb_elmt; ++i)
+      m_ptr[i] = list[i];
     return *this;
   }
 
@@ -266,9 +305,9 @@ class MultiArray
       throw std::logic_error("initSize must be called with template parameters values for static size");
     if (!(size_1 && (size_n && ...)))
       throw std::logic_error("Don't pass 0 as initSize parameter");
-    delete[] m_ptr;
+    m_alloc.deallocate(m_ptr, m_nb_elmt);
     m_nb_elmt = (size_1 * ... * size_n);
-    m_ptr = new T[m_nb_elmt];
+    m_ptr = m_alloc.allocate(m_nb_elmt);
     m_size = {static_cast<size_type>(size_1), static_cast<size_type>(size_n)...};
   }
 
@@ -281,11 +320,11 @@ class MultiArray
    * @param i Index of element of this dimension
    * @return MultiArray<T, DIM_N...> Irrelevant, used for variadic recursive private ctor calls
    */
-  MultiArray<T, DIM_N...> operator[](const size_type i) const {
+  MultiArray<T, Allocator, DIM_N...> operator[](const size_type i) const {
     std::array<size_type, sizeof...(DIM_N)> dimensions;
     std::copy(m_size.begin() + 1, m_size.end(), dimensions.begin());
     size_type nb_elmt(std::accumulate(dimensions.begin(), dimensions.end(), 1, std::multiplies<size_type>()));
-    return MultiArray<T, DIM_N...>(m_ptr + (i * nb_elmt), dimensions);
+    return MultiArray<T, Allocator, DIM_N...>(m_ptr + (i * nb_elmt), dimensions, m_alloc);
   }
 
   // *****************************************************************************
@@ -293,8 +332,8 @@ class MultiArray
   // Generic method wich recursively calls relevant operation for every dimensions
   // Scalar operations
   template <typename ScalarT, typename BinaryOp>
-  MultiArray<RES_TYPE(T, ScalarT), DIM_1, DIM_N...> scalarOp(ScalarT x, BinaryOp op) const {
-    MultiArray<RES_TYPE(T, ScalarT), DIM_1, DIM_N...> result;
+  MultiArray<RES_TYPE(T, ScalarT), Allocator, DIM_1, DIM_N...> scalarOp(ScalarT x, BinaryOp op) const {
+    MultiArray<RES_TYPE(T, ScalarT), Allocator, DIM_1, DIM_N...> result;
     std::transform(this->begin(), this->end(), result.begin(),
                    [&](auto& i){return op(static_cast<RES_TYPE(T, ScalarT)>(i), x);});
     return result;
@@ -310,7 +349,7 @@ class MultiArray
   }
   // Binary +
   template <typename ScalarT, TYPE_CHECK(T, ScalarT)>
-  MultiArray<RES_TYPE(T, ScalarT), DIM_1, DIM_N...> operator+(ScalarT x) const {
+  MultiArray<RES_TYPE(T, ScalarT), Allocator, DIM_1, DIM_N...> operator+(ScalarT x) const {
     return scalarOp(static_cast<RES_TYPE(T, ScalarT)>(x), std::plus<>());
   }
   template <typename ArrayT, typename std::enable_if_t<std::is_same_v<ArrayT, MultiArray>>* = nullptr>
@@ -323,7 +362,7 @@ class MultiArray
   }
   // Binary -
   template <typename ScalarT, TYPE_CHECK(T, ScalarT)>
-  MultiArray<RES_TYPE(T, ScalarT), DIM_1, DIM_N...> operator-(ScalarT x) const {
+  MultiArray<RES_TYPE(T, ScalarT), Allocator, DIM_1, DIM_N...> operator-(ScalarT x) const {
     return scalarOp(static_cast<RES_TYPE(T, ScalarT)>(x), std::minus<>());
   }
   template <typename ArrayT, typename std::enable_if_t<std::is_same_v<ArrayT, MultiArray>>* = nullptr>
@@ -332,7 +371,7 @@ class MultiArray
   }
   // Binary *
   template <typename ScalarT, TYPE_CHECK(T, ScalarT)>
-  MultiArray<RES_TYPE(T, ScalarT), DIM_1, DIM_N...> operator*(ScalarT x) const {
+  MultiArray<RES_TYPE(T, ScalarT), Allocator, DIM_1, DIM_N...> operator*(ScalarT x) const {
     return scalarOp(static_cast<RES_TYPE(T, ScalarT)>(x), std::multiplies<>());
   }
   template <typename ArrayT, typename std::enable_if_t<std::is_same_v<ArrayT, MultiArray>>* = nullptr>
@@ -341,7 +380,7 @@ class MultiArray
   }
   // Binary /
   template <typename ScalarT, TYPE_CHECK(T, ScalarT)>
-  MultiArray<RES_TYPE(T, ScalarT), DIM_1, DIM_N...> operator/(ScalarT x) const {
+  MultiArray<RES_TYPE(T, ScalarT), Allocator, DIM_1, DIM_N...> operator/(ScalarT x) const {
     return scalarOp(static_cast<RES_TYPE(T, ScalarT)>(x), std::divides<>());
   }
   template <typename ArrayT, typename std::enable_if_t<std::is_same_v<ArrayT, MultiArray>>* = nullptr>
@@ -409,14 +448,15 @@ class MultiArray
    * @param ptr data pointer to be used (instead of allocating memory like other ctor do)
    * @param dimensions array indicating number of elements for each dimension
    */
-  MultiArray(T* ptr, std::array<size_type, 1 + sizeof...(DIM_N)> dimensions)
+  MultiArray(T* ptr, std::array<size_type, 1 + sizeof...(DIM_N)> dimensions, Allocator alloc)
     : m_size(dimensions), m_nb_elmt(std::accumulate(m_size.begin(), m_size.end(), 1, std::multiplies<size_type>())),
-      m_self_destruct(false), m_ptr(ptr) {}
+      m_self_destruct(false), m_alloc(alloc), m_ptr(ptr) {}
 
  private:
   std::array<size_type, 1 + sizeof...(DIM_N)> m_size;
   size_type m_nb_elmt;
   bool m_self_destruct;
+  Allocator m_alloc;
   T* m_ptr;
 };
 
@@ -430,10 +470,11 @@ class MultiArray
  * @brief Specialized template for 1 dimension (to stop recursive variadic template calls)
  * 
  * @tparam T Data type
+ * @tparam Allocator User specified dynamic memory allocator
  * @tparam DIM Number of elements
  */
-template<typename T, size_t DIM>
-class MultiArray<T, DIM>
+template<typename T, typename Allocator, size_t DIM>
+class MultiArray<T, Allocator, DIM>
 {
   // friend variadic template class to solve private ctor problem
   // TODO: find why it's not enough ?!
@@ -452,9 +493,8 @@ class MultiArray<T, DIM>
    * When giving dimension a 0 value, initial memory allocation is only 1 element.
    * Dynamic resizing will be required by calling initSize(...) method.
    */
-  MultiArray() : m_size(DIM?DIM:1), m_self_destruct(true), m_ptr(nullptr) {
-    m_ptr = new T[m_size];
-  }
+  MultiArray(Allocator alloc = Allocator())
+    : m_size(DIM?DIM:1), m_self_destruct(true), m_alloc(alloc), m_ptr(m_alloc.allocate(m_size)) {}
 
   /**
    * @brief Construct a new Nablab Array object from a given initializer list
@@ -463,13 +503,16 @@ class MultiArray<T, DIM>
    * 
    * @param init List of initial values to be copied in allocated memory
    */
-  MultiArray(std::initializer_list<T> init)
-    : m_size(init.size()), m_self_destruct(true), m_ptr(nullptr) {
-      if (DIM != init.size())
-        throw std::logic_error(
-          "MultiArray ctor initializer list must have as much elements as indicated in class template parameter");
-      m_ptr = new T[m_size];
-      std::uninitialized_copy(init.begin(), init.end(), m_ptr);
+  MultiArray(std::initializer_list<T> init, Allocator alloc = Allocator())
+    : m_size(init.size()), m_self_destruct(true), m_alloc(alloc), m_ptr(nullptr) {
+    if (DIM != init.size())
+      throw std::logic_error(
+        "MultiArray ctor initializer list must have as much elements as indicated in class template parameter");
+    m_ptr = m_alloc.allocate(m_size);
+    std::uninitialized_copy(init.begin(), init.end(), m_ptr);
+    // for (size_type i(0); i < m_size; ++i)
+      // m_alloc.construct(&m_ptr[i], init[i]);
+      // std::construct_at(&m_ptr[i], init[i]);  // To change when above will be removed in C++20
   }
 
   /**
@@ -478,13 +521,36 @@ class MultiArray<T, DIM>
    * 
    * @param a MultiArray to copy
    */
-  MultiArray(const MultiArray& a)
-    : m_size(a.m_size), m_self_destruct(true), m_ptr(new T[m_size]) {
+  MultiArray(const MultiArray& a, Allocator alloc)
+    : m_size(a.m_size), m_self_destruct(true), m_alloc(alloc), m_ptr(nullptr) {
     if (m_size != a.m_size)
       throw std::logic_error("Can't construct MultiArray from another MultiArray with different dimensions");
+    m_ptr = m_alloc.allocate(m_size);
     std::uninitialized_copy(a.begin(), a.end(), m_ptr);
+    // for (size_type i(0); i < m_size; ++i)
+      // m_alloc.construct(&m_ptr[i], a.m_ptr[i]);
+      // std::construct_at(&m_ptr[i], a.m_ptr[i]);  // To change when above will be removed in C++20
   }
 
+  /**
+   * @brief (Deep) Copy contructor overload
+   * (copy every value os a into already allocated memory of this)
+   * 
+   * @param a MultiArray to copy
+   */
+  MultiArray(const MultiArray& a)
+    : m_size(a.m_size), m_self_destruct(true), m_alloc(a.m_alloc), m_ptr(nullptr) {
+    if (m_size != a.m_size)
+      throw std::logic_error("Can't construct MultiArray from another MultiArray with different dimensions");
+    m_ptr = m_alloc.allocate(m_size);
+    std::uninitialized_copy(a.begin(), a.end(), m_ptr);
+    // for (size_type i(0); i < m_size; ++i)
+      // m_alloc.construct(&m_ptr[i], a.m_ptr[i]);
+      // std::construct_at(&m_ptr[i], a.m_ptr[i]);  // To change when above will be removed in C++20
+  }
+
+// FIXME: Remove this Ctor, initSize has the same features and should be enough
+//        and futhermore, would be a terrible hassle to put an allocator as ctor parameter
   /**
    * @brief Constructor for dynamic dimension, which is indicated by a 0 value template parameter.
    * 
@@ -499,7 +565,7 @@ class MultiArray<T, DIM>
    * @param[in] size_n... Desired size for all other dimensions. Must reflect template parameters for non dynamic size
    */
   template<typename SIZE, typename std::enable_if_t<std::is_integral_v<std::decay_t<SIZE>>, void>* = nullptr>
-  MultiArray(SIZE size) : m_size(0), m_self_destruct(true), m_ptr(nullptr) {
+  MultiArray(SIZE size) : m_size(0), m_self_destruct(true), m_alloc(Allocator()), m_ptr(nullptr) {
     if (DIM && (DIM!=size))
       throw std::logic_error(
         std::string("Constructor for dynamic size must be called with template parameter value for static size")
@@ -509,7 +575,7 @@ class MultiArray<T, DIM>
     if constexpr(DIM) {
       return;
     } else {
-      m_ptr = new T[size];
+      m_ptr = m_alloc.allocate(m_size);
       // TODO: change to shared_ptr in the future, m_ptr = std::make_shared<T>(size);
       m_size = size;
     }
@@ -519,7 +585,14 @@ class MultiArray<T, DIM>
    * @brief Dtor
    * Destructor. Free memory only if boolean attribute m_self_destruct is true.
    */
-  ~MultiArray() {if (m_self_destruct) delete[] m_ptr;}
+  ~MultiArray() {
+    if (m_self_destruct) {
+      // for (size_type i(0); i < m_size; ++i)
+        // m_alloc.destroy(&m_ptr[i]);
+        // std::destroy_at(&m_ptr[i]);  // To change when above will be removed in C++20
+      m_alloc.deallocate(m_ptr, m_size);
+    }
+  }
 
   /**
    * @brief Deep copy operator (copy every value os a into already allocated memory of this)
@@ -531,6 +604,8 @@ class MultiArray<T, DIM>
     if (m_size != a.m_size)
       throw std::logic_error("Can't copy MultiArray with different dimensions (i.e. template parameters)");
     std::uninitialized_copy(a.begin(), a.end(), m_ptr);
+    // for (size_type i(0); i < m_size; ++i)
+      // m_ptr[i] = a.m_ptr[i];
     return *this;
   }
 
@@ -546,7 +621,8 @@ class MultiArray<T, DIM>
         "Initializer list in MultiArray copy operator has " + std::to_string(list.size()) +
         " elements but should have " + std::to_string(m_size));
     }
-    std::uninitialized_copy(list.begin(), list.end(), m_ptr);
+    for (size_type i(0); i < m_size; ++i)
+      m_ptr[i] = list[i];
     return *this;
   }
 
@@ -613,8 +689,8 @@ class MultiArray<T, DIM>
     if constexpr(DIM) {
       return;
     } else {
-      delete[] m_ptr;
-      m_ptr = new T[size];
+      m_alloc.deallocate(m_ptr, m_size);
+      m_ptr = m_alloc.allocate(size);
       // TODO: change shared_ptr inthe future, m_ptr = std::make_shared<T>(size);
       m_size = size;
     }
@@ -633,8 +709,8 @@ class MultiArray<T, DIM>
 // ********** Generic method wich calls relevant operation, return by value semantic **********
   // Scalar operations
   template <typename ScalarT, typename BinaryOp>
-  MultiArray<RES_TYPE(T, ScalarT), DIM> scalarOp(ScalarT x, BinaryOp op) const {
-    MultiArray<RES_TYPE(T, ScalarT), DIM> result;
+  MultiArray<RES_TYPE(T, ScalarT), Allocator, DIM> scalarOp(ScalarT x, BinaryOp op) const {
+    MultiArray<RES_TYPE(T, ScalarT), Allocator, DIM> result;
     std::transform(this->begin(), this->end(), result.begin(),
                    [&](auto& i){return op(static_cast<RES_TYPE(T, ScalarT)>(i), x);});
     return result;
@@ -650,7 +726,7 @@ class MultiArray<T, DIM>
   }
   // Binary +
   template <typename ScalarT, TYPE_CHECK(T, ScalarT)>
-  MultiArray<RES_TYPE(T, ScalarT), DIM> operator+(ScalarT x) const {
+  MultiArray<RES_TYPE(T, ScalarT), Allocator, DIM> operator+(ScalarT x) const {
     return scalarOp(static_cast<RES_TYPE(T, ScalarT)>(x), std::plus<>());
   }
   template <typename ArrayT, typename std::enable_if_t<std::is_same_v<ArrayT, MultiArray>>* = nullptr>
@@ -663,7 +739,7 @@ class MultiArray<T, DIM>
   }
   // Binary -
   template <typename ScalarT, TYPE_CHECK(T, ScalarT)>
-  MultiArray<RES_TYPE(T, ScalarT), DIM> operator-(ScalarT x) const {
+  MultiArray<RES_TYPE(T, ScalarT), Allocator, DIM> operator-(ScalarT x) const {
     return scalarOp(static_cast<RES_TYPE(T, ScalarT)>(x), std::minus<>());
   }
   template <typename ArrayT, typename std::enable_if_t<std::is_same_v<ArrayT, MultiArray>>* = nullptr>
@@ -672,7 +748,7 @@ class MultiArray<T, DIM>
   }
   // Binary *
   template <typename ScalarT, TYPE_CHECK(T, ScalarT)>
-  MultiArray<RES_TYPE(T, ScalarT), DIM> operator*(ScalarT x) const {
+  MultiArray<RES_TYPE(T, ScalarT), Allocator, DIM> operator*(ScalarT x) const {
     return scalarOp(static_cast<RES_TYPE(T, ScalarT)>(x), std::multiplies<>());
   }
   template <typename ArrayT, typename std::enable_if_t<std::is_same_v<ArrayT, MultiArray>>* = nullptr>
@@ -681,7 +757,7 @@ class MultiArray<T, DIM>
   }
   // Binary /
   template <typename ScalarT, TYPE_CHECK(T, ScalarT)>
-  MultiArray<RES_TYPE(T, ScalarT), DIM> operator/(ScalarT x) const {
+  MultiArray<RES_TYPE(T, ScalarT), Allocator, DIM> operator/(ScalarT x) const {
     return scalarOp(static_cast<RES_TYPE(T, ScalarT)>(x), std::divides<>());
   }
   template <typename ArrayT, typename std::enable_if_t<std::is_same_v<ArrayT, MultiArray>>* = nullptr>
@@ -750,13 +826,14 @@ class MultiArray<T, DIM>
    * @param ptr data pointer to be used (instead of allocating memory like other ctor do)
    * @param dimension array of only 1 element indicating number of elements for this dimension
    */
-  MultiArray(T* ptr, std::array<size_type, 1> dimensions)
+  MultiArray(T* ptr, std::array<size_type, 1> dimensions, Allocator alloc)
     : m_size(std::accumulate(dimensions.begin(), dimensions.end(), 1, std::multiplies<size_type>())),
-      m_self_destruct(false), m_ptr(ptr) {}
+      m_self_destruct(false), m_alloc(alloc), m_ptr(ptr) {}
 
  private:
   size_type m_size;
   bool m_self_destruct;
+  Allocator m_alloc;
   T* m_ptr;
 };
 
@@ -765,17 +842,17 @@ class MultiArray<T, DIM>
 // *****************************************************************************
 
 /// Pretty printer helper function for 1 dimension MultiArray
-template<typename T, size_t DIM>
-std::ostream& operator<<(std::ostream& os, const MultiArray<T, DIM>& array) {
-  for (typename MultiArray<T, DIM>::size_type i(0); i < array.size(); ++i)
+template<typename T, typename Allocator, size_t DIM>
+std::ostream& operator<<(std::ostream& os, const MultiArray<T, Allocator, DIM>& array) {
+  for (typename MultiArray<T, Allocator, DIM>::size_type i(0); i < array.size(); ++i)
     std::cout << (i==0?"| ":"") << array[i] << (i==array.size()-1?" |":" ");
   return os;
 }
 
 /// Pretty printer helper function for N dimension MultiArray
- template <typename T, size_t DIM_1, size_t... DIM_N, typename std::enable_if_t<(sizeof...(DIM_N)>0)>* = nullptr>
-std::ostream& operator<<(std::ostream& os, const MultiArray<T, DIM_1, DIM_N...>& array) {
-  for (typename MultiArray<T, DIM_1>::size_type i(0); i < array.size(); ++i)
+ template <typename T, typename Allocator, size_t DIM_1, size_t... DIM_N, typename std::enable_if_t<(sizeof...(DIM_N)>0)>* = nullptr>
+std::ostream& operator<<(std::ostream& os, const MultiArray<T, Allocator, DIM_1, DIM_N...>& array) {
+  for (typename MultiArray<T, Allocator, DIM_1>::size_type i(0); i < array.size(); ++i)
     std::cout << array[i] << std::endl;
   return os;
 }
@@ -785,14 +862,14 @@ std::ostream& operator<<(std::ostream& os, const MultiArray<T, DIM_1, DIM_N...>&
 // *****************************************************************************
 
 /// Commutative operator+ helper
-template <typename T, size_t DIM_1, size_t... DIM_N, typename std::enable_if_t<std::is_arithmetic_v<T>>* = nullptr>
-auto operator+(T lhs, MultiArray<T, DIM_1, DIM_N...> rhs) {
+template <typename T, typename Allocator, size_t DIM_1, size_t... DIM_N, typename std::enable_if_t<std::is_arithmetic_v<T>>* = nullptr>
+auto operator+(T lhs, MultiArray<T, Allocator, DIM_1, DIM_N...> rhs) {
   return rhs.operator+(lhs);
 }
 
 /// Commutative operator* helper
-template <typename T, size_t DIM_1, size_t... DIM_N, typename std::enable_if_t<std::is_arithmetic_v<T>>* = nullptr>
-auto operator*(T lhs, MultiArray<T, DIM_1, DIM_N...> rhs) {
+template <typename T, typename Allocator, size_t DIM_1, size_t... DIM_N, typename std::enable_if_t<std::is_arithmetic_v<T>>* = nullptr>
+auto operator*(T lhs, MultiArray<T, Allocator, DIM_1, DIM_N...> rhs) {
   return rhs.operator*(lhs);
 }
 
